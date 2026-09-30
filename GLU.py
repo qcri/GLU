@@ -2,13 +2,16 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 from glob import glob
 
-files = sorted(glob('/export/home/jomedina/collision-entropy/response_entropy/output/*-unified-uq.csv'))
+OUTPUT_DIR = "output/full"
+SUFFIX = "-unified-uq-full.jsonl"
+
+files = sorted(glob(f"{OUTPUT_DIR}/*{SUFFIX}"))
 
 dfs = {}
 for f in files:
-    df = pd.read_csv(f)
+    df = pd.read_json(f, lines=True, convert_dates=False)
     df['GLU'] = (1 + df['S_tilde']) * df['she_R_mean']
-    name = f.split('/')[-1].replace('-unified-uq.csv', '')
+    name = f.split('/')[-1].replace(SUFFIX, '')
     dfs[name] = df
 
     sub = df.dropna(subset=['label', 'GLU'])

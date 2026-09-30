@@ -30,14 +30,13 @@ Generation order:
   4. Single model forward pass on the fixed sequence with output_attentions for RAUQ
 
 Outputs:
-    ./output/{model}-{dataset}-unified-uq.csv
-    ./output/{model}-{dataset}-unified-uq-summary.json
+    ./output/full/{model}-{dataset}-unified-uq-full.jsonl
+    ./output/full/{model}-{dataset}-unified-uq-full-summary.json
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import os
@@ -473,6 +472,7 @@ def setup_azure_client():
     ), deployment
 
 
+
 def correctness_labeler(client, deployment, question, ground_truth, response):
     user_msg = f"Question: {question}\nAnswer: {ground_truth}\nResponse: {response}"
     try:
@@ -485,8 +485,10 @@ def correctness_labeler(client, deployment, question, ground_truth, response):
             temperature=0.0,
             model=deployment,
         )
-        label = out.choices[0].message.content.strip()
-        return int(label) if label in ("0", "1") else None
+        label_raw = out.choices[0].message.content.strip()
+        if label_raw not in ("0", "1"):
+            print(f"  [unexpected label] {repr(label_raw)}")  # catch edge cases
+        return int(label_raw) if label_raw in ("0", "1") else None
     except Exception as e:
         print(f"  [labeler error] {e}", flush=True)
         return None
@@ -504,14 +506,20 @@ model_id_name = {
 
 available_datasets = {
     "triviaqa":        "./small_datasets/triviaqa_small.csv",
+    "triviaqa_full":   "./small_datasets/triviaqa_validation.csv",
     "truthfulqa":      "./small_datasets/truthfulqa.csv",
     "math":            "./small_datasets/math_small.csv",
+    "arabica":       "./small_datasets/arabica_qa.csv",
+    "longform":      "./small_datasets/longform_subset.csv",
 }
 
 GROUND_TRUTH_COL = {
     "triviaqa":        "answer",
+    "triviaqa_full":   "answer",
     "truthfulqa":      "correct_answers",
     "math":            "answer",
+    "arabica":         "answer",
+    "longform":        "answer",
 }
 
 
@@ -521,6 +529,15 @@ def system_prompt_for(dataset_name: str) -> str:
             "Answer the question concisely without non-necessary words, "
             "think step by step but only write necessary computation steps. "
             "At the end, give the final answer number after 'Final Answer:'"
+        )
+    if dataset_name == "longform":
+        return (
+            "You are a helpful assistant."
+        )
+    if dataset_name == "arabica":
+        return (
+            "Respond in the same language as the question."
+            "Answer the question concisely without non-necessary words."
         )
     return "Answer the question concisely."
 
@@ -591,7 +608,7 @@ model.generation_config.disable_compile = True
 model._supports_static_cache = False
 
 client, deployment = setup_azure_client()
-os.makedirs("./output", exist_ok=True)
+os.makedirs("./output/full", exist_ok=True)
 
 for dataset_name in args.datasets:
     print(f"\n{'=' * 60}")
@@ -612,36 +629,13 @@ for dataset_name in args.datasets:
     verbose = args.test
 
     suffix = args.output_suffix
-    out_csv     = f"./output/{args.model}-{dataset_name}-unified-uq-full{suffix}.csv"
-    out_summary = f"./output/{args.model}-{dataset_name}-unified-uq-full{suffix}-summary.json"
-
-    fieldnames = [
-        "id", "prompt", "response", "ground_truth", "label",
-        "T", "num_prompt_tokens", "num_layers", "layer_idx_chosen",
-        # Shannon
-        "U_logit", "U_max", "U_shannon",
-        # EDL
-        "R_mean", "R_worst", "U_edl",
-        "she_R_mean", "she_R_worst", "she_U",
-        # RAUQ
-        "u_rauq", "u_rauq_per_layer",
-        # Geometry
-        "S_alpha", "S_tilde",
-        "S_alpha_per_layer", "S_tilde_per_layer", "eigenvalues_per_layer", "id_per_layer",
-        # Per-token data
-        "token_data",
-        "top100_logits",
-        "top100_token_ids",
-        "top100_probs",
-    ]
+    out_jsonl   = f"./output/full/{args.model}-{dataset_name}-unified-uq-full{suffix}.jsonl"
+    out_summary = f"./output/full/{args.model}-{dataset_name}-unified-uq-full{suffix}-summary.json"
 
     rows_buffer = []
 
-    print(f"Processing {n_samples} samples → {out_csv}", flush=True)
-    with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-
+    print(f"Processing {n_samples} samples → {out_jsonl}", flush=True)
+    with open(out_jsonl, "w", encoding="utf-8") as f:
         for i in tqdm(range(n_samples), disable=verbose):
             question     = dataset[i]["question"]
             ground_truth = dataset[i][gt_col]
@@ -708,19 +702,19 @@ for dataset_name in args.datasets:
                 "she_R_worst": res.she_R_worst,
                 "she_U": res.she_U,
                 "u_rauq": res.u_rauq,
-                "u_rauq_per_layer": json.dumps(res.u_rauq_per_layer),
+                "u_rauq_per_layer": res.u_rauq_per_layer,
                 "S_alpha": res.S_alpha,
                 "S_tilde": res.S_tilde,
-                "S_alpha_per_layer":     json.dumps(res.S_alpha_per_layer),
-                "S_tilde_per_layer":     json.dumps(res.S_tilde_per_layer),
-                "eigenvalues_per_layer": json.dumps(res.eigenvalues_per_layer),
-                "id_per_layer":      json.dumps(res.id_per_layer),
-                "token_data":        json.dumps(res.token_data),
-                "top100_logits":     json.dumps(res.top100_logits),
-                "top100_token_ids":  json.dumps(res.top100_token_ids),
-                "top100_probs":      json.dumps(res.top100_probs),
+                "S_alpha_per_layer":     res.S_alpha_per_layer,
+                "S_tilde_per_layer":     res.S_tilde_per_layer,
+                "eigenvalues_per_layer": res.eigenvalues_per_layer,
+                "id_per_layer":          res.id_per_layer,
+                "token_data":            res.token_data,
+                "top100_logits":         res.top100_logits,
+                "top100_token_ids":      res.top100_token_ids,
+                "top100_probs":          res.top100_probs,
             }
-            writer.writerow(row)
+            f.write(json.dumps(row) + "\n")
             f.flush()
 
             if label is not None:
